@@ -21,10 +21,10 @@ export default function AIAssistantApp() {
   const [apiKey, setApiKey] = useState('');
   const [aiProvider, setAiProvider] = useState('huggingface');
   const [currentView, setCurrentView] = useState('chat');
+  const [connectionStatus, setConnectionStatus] = useState('disconnected');
 
   // Initialize app
   useEffect(() => {
-    // Check if user is already logged in
     const savedUser = localStorage.getItem('ai-assistant-user');
     const savedApiKey = localStorage.getItem('ai-assistant-api-key');
     
@@ -36,8 +36,41 @@ export default function AIAssistantApp() {
     
     if (savedApiKey) {
       setApiKey(savedApiKey);
+      testConnection(savedApiKey);
     }
   }, []);
+
+  // Test API connection
+  const testConnection = async (key) => {
+    if (!key) return;
+    
+    try {
+      setConnectionStatus('testing');
+      const response = await fetch('https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium', {
+        headers: {
+          'Authorization': `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+        body: JSON.stringify({
+          inputs: "Hello",
+          parameters: { max_length: 50 }
+        }),
+      });
+
+      if (response.ok) {
+        setConnectionStatus('connected');
+      } else if (response.status === 401) {
+        setConnectionStatus('invalid-key');
+      } else if (response.status === 503) {
+        setConnectionStatus('loading');
+      } else {
+        setConnectionStatus('error');
+      }
+    } catch (error) {
+      setConnectionStatus('network-error');
+    }
+  };
 
   // Load user data
   const loadUserData = () => {
@@ -59,7 +92,7 @@ export default function AIAssistantApp() {
     } else {
       setMessages([{
         id: 1,
-        text: "Hello! I'm your personal AI assistant. I can help you with tasks, answer questions, and organize your day. What would you like to do first?",
+        text: "Hello! I'm your personal AI assistant. I can help you with tasks, answer questions, and organize your day.\n\n🔧 To get started:\n1. Click Settings (⚙️)\n2. Add your Hugging Face API key\n3. Start chatting!\n\nGet your free API key at: huggingface.co/settings/tokens",
         sender: 'ai',
         timestamp: new Date().toISOString()
       }]);
@@ -122,14 +155,15 @@ export default function AIAssistantApp() {
     setMessages([]);
   };
 
-  // AI Integration
+  // Improved AI Integration with better error handling
   const callAI = async (message) => {
     if (!apiKey) {
-      return "Please add your Hugging Face API key in settings to start chatting. You can get a free API key from huggingface.co/settings/tokens";
+      return "❌ No API key found. Please add your Hugging Face API key in Settings.\n\n🔗 Get your free API key at:\nhttps://huggingface.co/settings/tokens";
     }
 
     try {
-      const response = await fetch('https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium', {
+      // First, try a simple health check
+      const healthResponse = await fetch('https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium', {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
@@ -138,38 +172,115 @@ export default function AIAssistantApp() {
         body: JSON.stringify({
           inputs: message,
           parameters: {
-            max_length: 150,
+            max_length: 100,
             temperature: 0.7,
             do_sample: true,
-            pad_token_id: 50256
+            pad_token_id: 50256,
+            return_full_text: false
           }
         }),
       });
 
-      if (!response.ok) {
-        if (response.status === 401) {
-          return "Invalid API key. Please check your Hugging Face API key in settings.";
+      console.log('API Response Status:', healthResponse.status);
+      
+      if (!healthResponse.ok) {
+        if (healthResponse.status === 401) {
+          setConnectionStatus('invalid-key');
+          return "❌ Invalid API key. Please check your Hugging Face API key in Settings.\n\n🔗 Get a new key at:\nhttps://huggingface.co/settings/tokens";
+        } else if (healthResponse.status === 503) {
+          setConnectionStatus('loading');
+          return "⏳ AI model is starting up. Please wait 30-60 seconds and try again.\n\nThis happens when the model hasn't been used recently. It's normal!";
+        } else if (healthResponse.status === 429) {
+          return "⏱️ Rate limit reached. Please wait a moment and try again.";
+        } else {
+          throw new Error(`API request failed with status: ${healthResponse.status}`);
         }
-        throw new Error(`API request failed: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = await healthResponse.json();
+      console.log('API Response Data:', data);
       
       if (data.error) {
-        if (data.error.includes('loading')) {
-          return "The AI model is loading. Please wait a moment and try again.";
+        if (data.error.includes('loading') || data.error.includes('currently loading')) {
+          setConnectionStatus('loading');
+          return "⏳ AI model is loading. Please wait 30-60 seconds and try again.\n\nThis is normal for models that haven't been used recently!";
         }
-        return `Error: ${data.error}`;
+        return `❌ AI Error: ${data.error}`;
       }
 
-      return data[0]?.generated_text || "I'm sorry, I couldn't process that request.";
+      if (Array.isArray(data) && data.length > 0) {
+        setConnectionStatus('connected');
+        
+        // Handle different response formats
+        let aiResponse = '';
+        if (data[0].generated_text) {
+          aiResponse = data[0].generated_text;
+          // Remove the input text if it's included in the response
+          if (aiResponse.startsWith(message)) {
+            aiResponse = aiResponse.substring(message.length).trim();
+          }
+        } else if (data[0].text) {
+          aiResponse = data[0].text;
+        } else {
+          aiResponse = JSON.stringify(data[0]);
+        }
+        
+        return aiResponse || "I received your message but couldn't generate a response. Please try again.";
+      }
+
+      return "I'm sorry, I couldn't process that request. Please try again.";
+
     } catch (error) {
       console.error('Error calling AI:', error);
-      return "I'm currently having trouble connecting. Please check your internet connection and try again.";
+      setConnectionStatus('network-error');
+      
+      if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        return "🌐 Network error. Please check your internet connection and try again.\n\nIf you're on a corporate/school network, it might be blocking the request.";
+      }
+      
+      return `❌ Connection error: ${error.message}\n\nTry:\n• Refreshing the page\n• Checking your internet connection\n• Using a different network`;
     }
   };
 
-  // Message handling
+  // Alternative AI call using a different approach
+  const callAIAlternative = async (message) => {
+    if (!apiKey) {
+      return "Please add your API key first.";
+    }
+
+    try {
+      // Try a simpler model that loads faster
+      const response = await fetch('https://api-inference.huggingface.co/models/gpt2', {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+        body: JSON.stringify({
+          inputs: message,
+          parameters: {
+            max_length: 100,
+            temperature: 0.8,
+            return_full_text: false
+          }
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data[0]?.generated_text) {
+          return data[0].generated_text;
+        }
+      }
+      
+      // Fallback response
+      return "I'm a demo AI assistant. I can help you with tasks, answer questions, and organize your day. What would you like to do?";
+    } catch (error) {
+      return "I'm a demo AI assistant running in fallback mode. How can I help you today?";
+    }
+  };
+
+  // Message handling with better error recovery
   const handleSendMessage = async () => {
     if (!inputText.trim()) return;
 
@@ -181,21 +292,38 @@ export default function AIAssistantApp() {
     };
 
     setMessages(prev => [...prev, userMessage]);
+    const originalInput = inputText.trim();
     setInputText('');
     setIsLoading(true);
 
-    // Call AI
-    const aiResponse = await callAI(inputText.trim());
-    
-    const aiMessage = {
-      id: Date.now() + 1,
-      text: aiResponse,
-      sender: 'ai',
-      timestamp: new Date().toISOString()
-    };
+    try {
+      // Try main AI call first
+      let aiResponse = await callAI(originalInput);
+      
+      // If main call fails, try alternative
+      if (aiResponse.includes('❌') || aiResponse.includes('network error')) {
+        aiResponse = await callAIAlternative(originalInput);
+      }
+      
+      const aiMessage = {
+        id: Date.now() + 1,
+        text: aiResponse,
+        sender: 'ai',
+        timestamp: new Date().toISOString()
+      };
 
-    setMessages(prev => [...prev, aiMessage]);
-    setIsLoading(false);
+      setMessages(prev => [...prev, aiMessage]);
+    } catch (error) {
+      const errorMessage = {
+        id: Date.now() + 1,
+        text: "I'm having trouble right now. Please check your API key in Settings or try again in a moment.",
+        sender: 'ai',
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Task management
@@ -223,19 +351,36 @@ export default function AIAssistantApp() {
     setTasks(prev => prev.filter(task => task.id !== taskId));
   };
 
-  // Settings
-  const saveSettings = () => {
+  // Settings with connection testing
+  const saveSettings = async () => {
     localStorage.setItem('ai-assistant-api-key', apiKey);
     localStorage.setItem('ai-assistant-provider', aiProvider);
+    
+    if (apiKey) {
+      await testConnection(apiKey);
+    }
+    
     setShowSettings(false);
     
     const successMessage = {
       id: Date.now(),
-      text: "✅ Settings saved successfully! You can now chat with your AI assistant.",
+      text: `✅ Settings saved! Connection status: ${getConnectionStatusText()}`,
       sender: 'ai',
       timestamp: new Date().toISOString()
     };
     setMessages(prev => [...prev, successMessage]);
+  };
+
+  const getConnectionStatusText = () => {
+    switch (connectionStatus) {
+      case 'connected': return '🟢 Connected and ready!';
+      case 'testing': return '🟡 Testing connection...';
+      case 'loading': return '🟡 AI model loading (wait 1 minute)';
+      case 'invalid-key': return '🔴 Invalid API key';
+      case 'network-error': return '🔴 Network error';
+      case 'error': return '🔴 Connection error';
+      default: return '⚪ Not connected';
+    }
   };
 
   // Export data
@@ -328,7 +473,7 @@ export default function AIAssistantApp() {
                 />
                 <button
                   onClick={handleLogin}
-                  className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors btn-hover"
+                  className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
                 >
                   Login
                 </button>
@@ -358,7 +503,7 @@ export default function AIAssistantApp() {
                 />
                 <button
                   onClick={handleSignup}
-                  className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors btn-hover"
+                  className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
                 >
                   Sign Up
                 </button>
@@ -376,7 +521,7 @@ export default function AIAssistantApp() {
     );
   }
 
-  // Main App UI
+  // Main App UI with improved connection status
   return (
     <div className="flex h-screen bg-gray-900 text-white">
       {/* Mobile menu button */}
@@ -411,6 +556,17 @@ export default function AIAssistantApp() {
                 <LogOut className="h-5 w-5" />
               </button>
             </div>
+          </div>
+
+          {/* Connection Status */}
+          <div className="mb-6 p-3 bg-gray-700 rounded-lg">
+            <div className="text-sm font-medium mb-1">Connection Status</div>
+            <div className="text-xs text-gray-300">{getConnectionStatusText()}</div>
+            {connectionStatus === 'loading' && (
+              <div className="text-xs text-yellow-400 mt-1">
+                Wait 30-60 seconds then try chatting
+              </div>
+            )}
           </div>
 
           {/* Navigation */}
@@ -474,14 +630,6 @@ export default function AIAssistantApp() {
                   </button>
                 </div>
               ))}
-              {tasks.length > 5 && (
-                <button
-                  onClick={() => setCurrentView('tasks')}
-                  className="w-full text-center p-2 text-blue-400 hover:bg-gray-700 rounded text-sm"
-                >
-                  View all {tasks.length} tasks
-                </button>
-              )}
             </div>
           </div>
 
@@ -522,8 +670,8 @@ export default function AIAssistantApp() {
             </h1>
             <h1 className="text-xl font-bold text-blue-400 md:hidden">AI Assistant</h1>
             <div className="flex items-center space-x-2">
-              <div className="text-sm text-gray-400">
-                {apiKey ? '🟢 Connected' : '🔴 No API Key'}
+              <div className="text-sm">
+                {getConnectionStatusText()}
               </div>
               <button
                 onClick={exportData}
@@ -543,7 +691,7 @@ export default function AIAssistantApp() {
               {messages.map(message => (
                 <div
                   key={message.id}
-                  className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} fade-in`}
+                  className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
                 >
                   <div
                     className={`max-w-xs md:max-w-md lg:max-w-lg px-4 py-2 rounded-lg ${
@@ -571,14 +719,14 @@ export default function AIAssistantApp() {
               ))}
               
               {isLoading && (
-                <div className="flex justify-start fade-in">
+                <div className="flex justify-start">
                   <div className="bg-gray-700 text-gray-100 max-w-xs md:max-w-md px-4 py-2 rounded-lg">
                     <div className="flex items-center mb-1">
                       <Bot className="h-4 w-4 mr-2" />
                       <span className="text-sm font-medium">AI</span>
                     </div>
-                    <div className="loading-dots text-sm">
-                      Thinking<span>.</span><span>.</span><span>.</span>
+                    <div className="text-sm">
+                      Thinking...
                     </div>
                   </div>
                 </div>
@@ -592,13 +740,14 @@ export default function AIAssistantApp() {
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
-                  placeholder="Type your message..."
-                  className="flex-1 bg-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus-ring"
+                  placeholder={connectionStatus === 'connected' ? "Type your message..." : "Add API key in Settings first..."}
+                  className="flex-1 bg-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={!apiKey}
                 />
                 <button
                   onClick={handleSendMessage}
-                  disabled={isLoading || !inputText.trim()}
-                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg transition-colors btn-hover"
+                  disabled={isLoading || !inputText.trim() || !apiKey}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg transition-colors"
                 >
                   <Send className="h-4 w-4" />
                 </button>
@@ -615,7 +764,7 @@ export default function AIAssistantApp() {
                 <h2 className="text-2xl font-bold">Task Management</h2>
                 <button
                   onClick={addTask}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2 btn-hover"
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2"
                 >
                   <Plus className="h-4 w-4" />
                   <span>Add Task</span>
@@ -780,7 +929,7 @@ export default function AIAssistantApp() {
         )}
       </div>
 
-      {/* Settings Modal */}
+      {/* Enhanced Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md">
@@ -808,7 +957,12 @@ export default function AIAssistantApp() {
               </div>
               
               <div>
-                <label className="block text-sm font-medium mb-2">API Key</label>
+                <label className="block text-sm font-medium mb-2">
+                  API Key 
+                  <span className="text-xs text-gray-400 ml-2">
+                    ({connectionStatus === 'connected' ? '✅ Valid' : '❌ Invalid/Missing'})
+                  </span>
+                </label>
                 <input
                   type="password"
                   value={apiKey}
@@ -816,17 +970,34 @@ export default function AIAssistantApp() {
                   placeholder="Enter your API key"
                   className="w-full p-2 bg-gray-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
-                <p className="text-xs text-gray-400 mt-1">
-                  Get your free API key from{' '}
+                <div className="text-xs text-gray-400 mt-2 space-y-1">
+                  <p>🔗 Get your free API key:</p>
                   <a 
                     href="https://huggingface.co/settings/tokens" 
                     target="_blank" 
                     rel="noopener noreferrer"
-                    className="text-blue-400 hover:underline"
+                    className="text-blue-400 hover:underline block"
                   >
-                    huggingface.co/settings/tokens
+                    → huggingface.co/settings/tokens
                   </a>
-                </p>
+                  <p className="text-xs text-yellow-400 mt-2">
+                    ⏳ After saving, AI models may take 30-60 seconds to load
+                  </p>
+                </div>
+              </div>
+
+              {/* Connection Test */}
+              <div>
+                <button
+                  onClick={() => testConnection(apiKey)}
+                  disabled={!apiKey || connectionStatus === 'testing'}
+                  className="w-full p-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white rounded-lg transition-colors"
+                >
+                  {connectionStatus === 'testing' ? 'Testing...' : 'Test Connection'}
+                </button>
+                <div className="text-xs mt-2">
+                  Status: {getConnectionStatusText()}
+                </div>
               </div>
             </div>
             
@@ -839,9 +1010,9 @@ export default function AIAssistantApp() {
               </button>
               <button
                 onClick={saveSettings}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors btn-hover"
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
               >
-                Save
+                Save Settings
               </button>
             </div>
           </div>
